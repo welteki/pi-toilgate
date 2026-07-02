@@ -6,6 +6,10 @@
  *
  * /login → toilgate  (Google OAuth via browser or device code)
  *
+ * Bot token (non-interactive): set client credentials instead of using Google sign-in:
+ *   export TOILGATE_CLIENT_ID=pi_provider
+ *   export TOILGATE_CLIENT_SECRET=...your-secret...
+ *
  * Requires TOILGATE_URL to be set before starting Pi:
  *   export TOILGATE_URL=https://your-toilgate-server.example.com
  */
@@ -17,6 +21,18 @@ const CLIENT_ID = "opencode";
 const REDIRECT_URI = "http://127.0.0.1:14641/callback";
 const REFRESH_SKEW_MS = 60_000;
 const USER_AGENT = "Pi/1.0 (pi-coding-agent; toilgate-extension)";
+
+interface ClientCredentials {
+  clientId: string;
+  clientSecret: string;
+}
+
+function resolveClientCredentials(): ClientCredentials | undefined {
+  const id = process.env["TOILGATE_CLIENT_ID"];
+  const secret = process.env["TOILGATE_CLIENT_SECRET"];
+  if (id && secret) return { clientId: id, clientSecret: secret };
+  return undefined;
+}
 
 function resolveIssuer(): string | undefined {
   const raw = process.env["TOILGATE_URL"];
@@ -44,22 +60,34 @@ type TokenSet = { access: string; refresh: string; expires: number };
 
 async function tokenGrant(
   issuer: string,
-  form: Record<string, string>
+  form: Record<string, string>,
+  clientSecret?: string,
+  clientId?: string,
 ): Promise<TokenSet | { error: string }> {
+  const cid = clientId ?? CLIENT_ID;
+  const body = new URLSearchParams({ client_id: cid, ...form }).toString();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/x-www-form-urlencoded",
+    "User-Agent": USER_AGENT,
+  };
+  if (clientSecret) {
+    const raw = btoa(`${cid}:${clientSecret}`);
+    headers["Authorization"] = `Basic ${raw}`;
+  }
   const res = await fetch(`${issuer}/token`, {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": USER_AGENT },
-    body: new URLSearchParams({ client_id: CLIENT_ID, ...form }).toString(),
+    headers,
+    body,
   });
-  const body = (await res.json()) as Record<string, unknown>;
-  if (typeof body["error"] === "string") return { error: body["error"] as string };
-  if (!res.ok || typeof body["access_token"] !== "string") {
+  const json = (await res.json()) as Record<string, unknown>;
+  if (typeof json["error"] === "string") return { error: json["error"] as string };
+  if (!res.ok || typeof json["access_token"] !== "string") {
     return { error: `token endpoint returned ${res.status}` };
   }
   return {
-    access: body["access_token"] as string,
-    refresh: body["refresh_token"] as string,
-    expires: Date.now() + Number(body["expires_in"] ?? 3600) * 1000,
+    access: json["access_token"] as string,
+    refresh: json["refresh_token"] as string,
+    expires: Date.now() + Number(json["expires_in"] ?? 3600) * 1000,
   };
 }
 
@@ -157,6 +185,17 @@ async function deviceCodeLogin(
   throw new Error("toilgate device code expired");
 }
 
+async function clientCredentialsLogin(
+  issuer: string,
+  creds: ClientCredentials,
+): Promise<OAuthCredentials> {
+  const tokens = await tokenGrant(issuer, {
+    grant_type: "client_credentials",
+  }, creds.clientSecret, creds.clientId);
+  if ("error" in tokens) throw new Error(`toilgate client credentials login failed: ${tokens.error}`);
+  return { refresh: tokens.refresh, access: tokens.access, expires: tokens.expires };
+}
+
 export default async function (pi: ExtensionAPI) {
   const issuer = resolveIssuer();
   if (!issuer) {
@@ -187,6 +226,33 @@ export default async function (pi: ExtensionAPI) {
     // toilgate unreachable at startup — provider registered without models
   }
 
+  const botCreds = resolveClientCredentials();
+
+  // Bot token path: pre-authenticate at load time and register as a plain API key.
+  // This avoids the OAuth system entirely — Pi never calls login()/refreshToken()
+  // unless you explicitly run /login, so we fetch the token upfront instead.
+  if (botCreds) {
+    let accessToken: string;
+    try {
+      const creds = await clientCredentialsLogin(issuer, botCreds);
+      accessToken = creds.access;
+    } catch (err: any) {
+      console.error(`toilgate: bot token login failed: ${err.message}`);
+      return;
+    }
+
+    pi.registerProvider(PROVIDER_ID, {
+      baseUrl: `${issuer}/v1`,
+      apiKey: accessToken,
+      authHeader: true,
+      api: "openai-completions",
+      headers: { "User-Agent": USER_AGENT },
+      models,
+    });
+    return;
+  }
+
+  // Google OAuth path: interactive login with refresh token storage.
   pi.registerProvider(PROVIDER_ID, {
     baseUrl: `${issuer}/v1`,
     apiKey: "toilgate",

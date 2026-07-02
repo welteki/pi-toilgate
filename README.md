@@ -27,7 +27,19 @@ Add the repo to the `packages` list in `~/.pi/agent/settings.json`:
 
 Pi will fetch and load the extension automatically on next launch.
 
-## Sign in
+## Bot Token (non-interactive)
+
+If you have client credentials from your toilgate server, set them as environment variables and skip Google sign-in entirely:
+
+```bash
+export TOILGATE_CLIENT_ID=pi_provider
+export TOILGATE_CLIENT_SECRET=...your-secret...
+```
+
+Pi will use the OAuth 2.0 client credentials grant to obtain an access token automatically.
+No browser interaction is needed — this works perfectly in CI, SSH, and headless environments.
+
+## Sign in (Google OAuth)
 
 Run `/login` inside Pi and select **toilgate**, then follow the prompts to sign in with Google.
 
@@ -36,7 +48,9 @@ Run `/login` inside Pi and select **toilgate**, then follow the prompts to sign 
 
 Your credentials are saved and refreshed automatically, so you only need to sign in once.
 
-## Configuration
+## Configuration (Google OAuth)
+
+When using Google OAuth (no client credentials set), configure:
 
 Set `TOILGATE_URL` in your shell environment before starting Pi:
 
